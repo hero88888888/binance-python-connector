@@ -13,6 +13,7 @@ from typing import Any, Literal, Optional, Union
 from binance_book.api import endpoints as ep
 from binance_book.api.rest import BinanceRestClient
 from binance_book.config import BinanceBookConfig, FilterConfig
+from binance_book.error_reporting import ErrorReporter, SmtpConfig, report_bug as _report_bug
 from binance_book.exceptions import DependencyError, InvalidSymbolError
 from binance_book.markets import MarketType, fetch_symbols, get_symbol_names
 from binance_book.schemas.base import Side, Timestamp
@@ -132,12 +133,28 @@ class BinanceBook:
         Tokens reserved for system prompt / conversation. Default 64000.
     timeout : float
         HTTP request timeout in seconds.
+    error_reporting : bool
+        If True, capture all uncaught exceptions and store them in an
+        internal error log.  Errors can be retrieved via ``get_error_log()``
+        or sent via ``report_bug()``.  Default False.
+    auto_email_errors : bool
+        If True (and ``error_reporting=True``), automatically email error
+        reports to the maintainer when uncaught exceptions occur.  Requires
+        SMTP configuration via env vars (``BINANCE_BOOK_SMTP_USER``,
+        ``BINANCE_BOOK_SMTP_PASS``) or explicit ``smtp_config``.  Default False.
+    smtp_config : SmtpConfig, optional
+        Explicit SMTP configuration for auto-email.  If not provided,
+        falls back to environment variables.
 
     Examples
     --------
     >>> book = BinanceBook()
     >>> symbols = book.symbols(quote="USDT")
     >>> ob = book.ob_snapshot_wide("BTCUSDT", max_levels=5)
+
+    Enable error reporting with auto-email:
+
+    >>> book = BinanceBook(error_reporting=True, auto_email_errors=True)
     """
 
     def __init__(
@@ -150,6 +167,9 @@ class BinanceBook:
         context_budget: Optional[int] = None,
         reserved_tokens: int = 64000,
         timeout: float = 10.0,
+        error_reporting: bool = False,
+        auto_email_errors: bool = False,
+        smtp_config: Optional[SmtpConfig] = None,
     ) -> None:
         self._config = BinanceBookConfig(
             api_key=api_key,
@@ -169,12 +189,22 @@ class BinanceBook:
         )
         self._symbol_cache: dict[str, SymbolInfo] = {}
 
+        # Error reporting
+        self._error_reporter = ErrorReporter(
+            enabled=error_reporting,
+            auto_email=auto_email_errors,
+            smtp_config=smtp_config,
+        )
+        if error_reporting:
+            self._error_reporter.install_excepthook()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def close(self) -> None:
         """Close all connections and release resources."""
+        self._error_reporter.uninstall_excepthook()
         await self._rest.close()
 
     async def __aenter__(self) -> "BinanceBook":
@@ -182,6 +212,45 @@ class BinanceBook:
 
     async def __aexit__(self, *args: Any) -> None:
         await self.close()
+
+    # ------------------------------------------------------------------
+    # Error reporting
+    # ------------------------------------------------------------------
+
+    def get_error_log(self) -> str:
+        """Get all captured errors as a formatted text log.
+
+        Requires ``error_reporting=True`` when creating the client.
+
+        Returns
+        -------
+        str
+            Formatted error log. API keys and secrets are never included.
+        """
+        return self._error_reporter.get_error_log()
+
+    def report_bug(
+        self,
+        description: str = "",
+        method: str = "email",
+    ) -> str:
+        """Generate and send a bug report with captured errors.
+
+        Parameters
+        ----------
+        description : str
+            Description of what went wrong.
+        method : str
+            How to send: ``"email"`` (opens mailto link), ``"github"``
+            (opens GitHub issue), ``"send"`` (sends via SMTP immediately),
+            or ``"text"`` (returns report as string).
+
+        Returns
+        -------
+        str
+            The bug report text.
+        """
+        return _report_bug(description, self._error_reporter, method)
 
     # ------------------------------------------------------------------
     # Schema introspection
@@ -299,7 +368,7 @@ class BinanceBook:
 
         registry = ToolRegistry(self)
         server = MCPServer(registry)
-        _run_sync(server.serve(host=host, port=port))
+        _run_sync(server.serve(host=host, port=port), error_reporter=self._error_reporter)
 
     # ------------------------------------------------------------------
     # Symbol discovery
@@ -337,7 +406,10 @@ class BinanceBook:
         --------
         >>> symbols = book.symbols(quote="USDT", min_volume_24h=1_000_000)
         """
-        return _run_sync(self._symbols_async(market, quote, status, min_volume_24h))
+        return _run_sync(
+            self._symbols_async(market, quote, status, min_volume_24h),
+            error_reporter=self._error_reporter,
+        )
 
     async def _symbols_async(
         self,
@@ -398,7 +470,8 @@ class BinanceBook:
             Orderbook levels depending on ``format``.
         """
         return _run_sync(
-            self._ob_snapshot_async(symbol, max_levels, market, detail, format, clean, annotate)
+            self._ob_snapshot_async(symbol, max_levels, market, detail, format, clean, annotate),
+            error_reporter=self._error_reporter,
         )
 
     async def _ob_snapshot_async(
@@ -482,7 +555,8 @@ class BinanceBook:
             Wide-format orderbook levels.
         """
         return _run_sync(
-            self._ob_snapshot_wide_async(symbol, max_levels, market, detail, format, clean, annotate)
+            self._ob_snapshot_wide_async(symbol, max_levels, market, detail, format, clean, annotate),
+            error_reporter=self._error_reporter,
         )
 
     async def _ob_snapshot_wide_async(
@@ -574,7 +648,8 @@ class BinanceBook:
             Single-row flattened orderbook.
         """
         return _run_sync(
-            self._ob_snapshot_flat_async(symbol, max_levels, market, detail, format, clean)
+            self._ob_snapshot_flat_async(symbol, max_levels, market, detail, format, clean),
+            error_reporter=self._error_reporter,
         )
 
     async def _ob_snapshot_flat_async(
@@ -652,7 +727,7 @@ class BinanceBook:
         list[dict] or DataFrame or str
             Recent trades.
         """
-        return _run_sync(self._trades_async(symbol, limit, market, format))
+        return _run_sync(self._trades_async(symbol, limit, market, format), error_reporter=self._error_reporter)
 
     async def _trades_async(
         self,
@@ -701,7 +776,7 @@ class BinanceBook:
         list[dict] or DataFrame or str
             OHLCV bars.
         """
-        return _run_sync(self._klines_async(symbol, interval, limit, market, format))
+        return _run_sync(self._klines_async(symbol, interval, limit, market, format), error_reporter=self._error_reporter)
 
     async def _klines_async(
         self,
@@ -744,7 +819,7 @@ class BinanceBook:
         dict
             Quote with BID_PRICE, BID_SIZE, ASK_PRICE, ASK_SIZE, SPREAD, MID_PRICE.
         """
-        return _run_sync(self._quote_async(symbol, market))
+        return _run_sync(self._quote_async(symbol, market), error_reporter=self._error_reporter)
 
     async def _quote_async(
         self,
@@ -788,7 +863,7 @@ class BinanceBook:
         dict or list[dict] or DataFrame or str
             24hr ticker statistics.
         """
-        return _run_sync(self._ticker_24hr_async(symbol, market, format))
+        return _run_sync(self._ticker_24hr_async(symbol, market, format), error_reporter=self._error_reporter)
 
     async def _ticker_24hr_async(
         self,
@@ -841,7 +916,7 @@ class BinanceBook:
         float
             Imbalance in [-1, +1].
         """
-        return _run_sync(self._imbalance_async(symbol, levels, weighted, market))
+        return _run_sync(self._imbalance_async(symbol, levels, weighted, market), error_reporter=self._error_reporter)
 
     async def _imbalance_async(
         self, symbol: str, levels: int, weighted: bool, market: Optional[MarketType]
@@ -883,7 +958,7 @@ class BinanceBook:
         dict
             ``vwap``, ``total_cost``, ``filled_qty``, ``levels_consumed``.
         """
-        return _run_sync(self._sweep_by_qty_async(symbol, side, qty, market))
+        return _run_sync(self._sweep_by_qty_async(symbol, side, qty, market), error_reporter=self._error_reporter)
 
     async def _sweep_by_qty_async(
         self, symbol: str, side: str, qty: float, market: Optional[MarketType]
@@ -921,7 +996,7 @@ class BinanceBook:
         dict
             ``total_qty``, ``total_notional``, ``levels_consumed``.
         """
-        return _run_sync(self._sweep_by_price_async(symbol, side, price, market))
+        return _run_sync(self._sweep_by_price_async(symbol, side, price, market), error_reporter=self._error_reporter)
 
     async def _sweep_by_price_async(
         self, symbol: str, side: str, price: float, market: Optional[MarketType]
@@ -956,7 +1031,7 @@ class BinanceBook:
         dict
             ``quoted``, ``quoted_bps``, ``mid``, ``notional_bid``, ``notional_ask``.
         """
-        return _run_sync(self._spread_async(symbol, market))
+        return _run_sync(self._spread_async(symbol, market), error_reporter=self._error_reporter)
 
     async def _spread_async(
         self, symbol: str, market: Optional[MarketType]
@@ -1389,31 +1464,41 @@ def _get_shared_loop() -> asyncio.AbstractEventLoop:
     return _shared_loop
 
 
-def _run_sync(coro: Any) -> Any:
+def _run_sync(coro: Any, error_reporter: Optional[ErrorReporter] = None) -> Any:
     """Run an async coroutine synchronously.
 
     Uses a persistent shared event loop so that aiohttp sessions survive
     across multiple sync method calls.  If an event loop is already running
     (e.g. in Jupyter), falls back to nest_asyncio.
+
+    If an ``ErrorReporter`` is provided and enabled, any exception that
+    propagates out of the coroutine is captured before re-raising.
     """
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
 
+    runner = loop if loop is not None else _get_shared_loop()
+
     if loop is not None:
         try:
             import nest_asyncio
             nest_asyncio.apply()
-            return loop.run_until_complete(coro)
         except ImportError:
             raise RuntimeError(
                 "An event loop is already running. Either use `await` with async methods, "
                 "or install nest_asyncio: pip install nest_asyncio"
             )
 
-    shared = _get_shared_loop()
-    return shared.run_until_complete(coro)
+    try:
+        return runner.run_until_complete(coro)
+    except Exception as exc:
+        if error_reporter and error_reporter.enabled:
+            # Try to determine context from the coroutine name
+            context = getattr(coro, '__qualname__', '') or getattr(coro, '__name__', '')
+            error_reporter.capture(exc, context=context)
+        raise
 
 
 # ---------------------------------------------------------------------------
