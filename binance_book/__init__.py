@@ -3,4 +3,4 @@
 from binance_book.client import BinanceBook
 
 __all__ = ["BinanceBook"]
-__version__ = "0.1.0"
+__version__ = "0.1.1"

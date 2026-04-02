@@ -1,11 +1,11 @@
 [project]
 name = "binance-book"
-version = "0.1.0"
+version = "0.1.1"
 description = "The best agentic AI wrapper for Binance orderbook data. Typed schemas, context-window-aware output, built-in data cleaning, and orderbook analytics."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-authors = [{ name = "Jae" }]
+authors = [{ name = "pr8wn" }]
 keywords = [
     "binance",
     "orderbook",
