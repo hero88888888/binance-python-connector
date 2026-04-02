@@ -1069,6 +1069,152 @@ class BinanceBook:
                     })
                 yield wide_rows
 
+    async def depth_cache(
+        self,
+        symbol: str,
+        market: Optional[MarketType] = None,
+        max_levels: int = 1000,
+        ws_speed: int = 100,
+        on_update: Optional[Any] = None,
+    ) -> Any:
+        """Create and start a full-depth DepthCache with the Binance sync protocol.
+
+        Unlike ``ob_stream()`` which uses partial-depth streams (top 5/10/20),
+        this creates a fully synchronized local orderbook using the diff-depth
+        stream + REST snapshot protocol.  Handles update-ID sequencing, gap
+        detection with auto-resnapshot, zero-quantity pruning, and bounded
+        book size.
+
+        This is the right choice when you need:
+        - Full book depth (not just top 5/10/20)
+        - Sequencing guarantees (every update applied in order)
+        - Deep liquidity analysis
+
+        Parameters
+        ----------
+        symbol : str
+            Trading pair symbol (e.g. ``"BTCUSDT"``).
+        market : str, optional
+            Override market type.
+        max_levels : int
+            Maximum price levels to maintain per side. Default 1000.
+        ws_speed : int
+            WebSocket update speed in ms: 100 or 1000.
+        on_update : callable, optional
+            Push-model callback invoked on every book update.  Receives the
+            ``DepthCache`` instance.  Can be sync or async.
+
+        Returns
+        -------
+        DepthCache
+            A started, synchronizing depth cache.  Call ``await cache.wait_synced()``
+            before reading, and ``await cache.stop()`` when done.
+
+        Examples
+        --------
+        >>> cache = await book.depth_cache("BTCUSDT")
+        >>> await cache.wait_synced()
+        >>> print(cache.get_best_bid(), cache.get_best_ask())
+        >>> print(cache.get_bids(limit=50))  # full depth, not just top 5/10/20
+        >>> await cache.stop()
+        """
+        from binance_book.book.depth_cache import DepthCache
+
+        mkt = market or self._config.market
+        client = self._get_rest_client(mkt)
+        ws_url = BinanceBookConfig(
+            testnet=self._config.testnet, market=mkt
+        ).get_ws_base_url()
+
+        cache = DepthCache(
+            symbol=symbol,
+            rest_client=client,
+            market=mkt,
+            max_levels=max_levels,
+            ws_speed=ws_speed,
+            on_update=on_update,
+        )
+        await cache.start(ws_url)
+        return cache
+
+    async def ob_stream_full(
+        self,
+        symbol: str,
+        max_levels: int = 100,
+        market: Optional[MarketType] = None,
+        format: Literal["snapshot", "wide", "flat"] = "wide",
+        on_update: Optional[Any] = None,
+    ) -> Any:
+        """Async iterator yielding full-depth orderbook snapshots via the sync protocol.
+
+        Unlike ``ob_stream()`` (which uses partial-depth streams limited to
+        5/10/20 levels), this uses a full ``DepthCache`` with the Binance
+        diff-depth sync protocol — giving you sequenced, gap-detected,
+        full-depth book snapshots.
+
+        Parameters
+        ----------
+        symbol : str
+            Trading pair symbol.
+        max_levels : int
+            Max levels to include in each yielded snapshot.  The cache
+            maintains up to 1000 levels internally; this controls output size.
+        market : str, optional
+            Override market type.
+        format : str
+            ``"snapshot"`` (per level per side), ``"wide"`` (paired),
+            ``"flat"`` (single row).
+        on_update : callable, optional
+            Push-model callback on every update (in addition to yielding).
+
+        Yields
+        ------
+        list[dict] or dict
+            Orderbook snapshot after each update.
+        """
+        from binance_book.book.snapshot import (
+            ob_snapshot_from_cache,
+            ob_snapshot_wide_from_cache,
+            ob_snapshot_flat_from_cache,
+        )
+
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+
+        def _push(cache: Any) -> None:
+            if on_update:
+                try:
+                    result = on_update(cache)
+                    if asyncio.iscoroutine(result):
+                        asyncio.get_event_loop().create_task(result)
+                except Exception:
+                    pass
+            try:
+                queue.put_nowait(cache)
+            except asyncio.QueueFull:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                queue.put_nowait(cache)
+
+        cache = await self.depth_cache(
+            symbol, market=market, on_update=_push,
+        )
+
+        try:
+            await cache.wait_synced(timeout=30)
+
+            while True:
+                updated_cache = await queue.get()
+                if format == "snapshot":
+                    yield ob_snapshot_from_cache(updated_cache, max_levels)
+                elif format == "flat":
+                    yield ob_snapshot_flat_from_cache(updated_cache, max_levels)
+                else:
+                    yield ob_snapshot_wide_from_cache(updated_cache, max_levels)
+        finally:
+            await cache.stop()
+
     async def trade_stream(
         self,
         symbol: str,
