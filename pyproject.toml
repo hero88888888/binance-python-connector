@@ -1,0 +1,69 @@
+[project]
+name = "binance-book"
+version = "0.1.0"
+description = "The best agentic AI wrapper for Binance orderbook data. Typed schemas, context-window-aware output, built-in data cleaning, and orderbook analytics."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Jae" }]
+keywords = [
+    "binance",
+    "orderbook",
+    "crypto",
+    "agentic",
+    "ai",
+    "hft",
+    "market-data",
+    "websocket",
+    "trading",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Typing :: Typed",
+]
+dependencies = [
+    "aiohttp>=3.9",
+    "websockets>=12.0",
+    "pydantic>=2.0",
+    "orjson>=3.9",
+    "sortedcontainers>=2.4",
+]
+
+[project.optional-dependencies]
+dataframe = ["pandas>=2.0"]
+analytics = ["numpy>=1.24"]
+parquet = ["pyarrow>=14.0"]
+all = ["pandas>=2.0", "numpy>=1.24", "pyarrow>=14.0"]
+
+[project.urls]
+Homepage = "https://github.com/hero88888888/binance-python-connector"
+Documentation = "https://hero88888888.github.io/binance-python-connector"
+Repository = "https://github.com/hero88888888/binance-python-connector"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["binance_book"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
