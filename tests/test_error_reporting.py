@@ -569,10 +569,10 @@ class TestClientErrorReporting:
     def test_errors_captured_on_exception(self):
         """When error_reporting is on and a method raises, the error is captured."""
         from binance_book.client import BinanceBook
-        book = BinanceBook(error_reporting=True)
+        book = BinanceBook(error_reporting=True, timeout=2.0)
         try:
-            # This will fail because there's no mock, but the error should be captured
-            book.quote("BTCUSDT")
+            # Use a fake symbol that guarantees a Binance API error
+            book.quote("FAKESYMBOL999")
         except Exception:
             pass
         assert book._error_reporter.error_count >= 1
@@ -581,9 +581,9 @@ class TestClientErrorReporting:
 
     def test_errors_not_captured_when_disabled(self):
         from binance_book.client import BinanceBook
-        book = BinanceBook(error_reporting=False)
+        book = BinanceBook(error_reporting=False, timeout=2.0)
         try:
-            book.quote("BTCUSDT")
+            book.quote("FAKESYMBOL999")
         except Exception:
             pass
         assert book._error_reporter.error_count == 0
