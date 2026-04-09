@@ -114,6 +114,8 @@ class TelemetryCollector:
         ws_window_size: int = 1000,
     ) -> None:
         self._enabled = enabled
+        self._ws_spike_threshold_ms = ws_spike_threshold_ms
+        self._ws_window_size = ws_window_size
         self._rest_stats: dict[str, RestEndpointStats] = {}
         self._latency_monitor = LatencyMonitor(
             spike_threshold_ms=ws_spike_threshold_ms,
@@ -246,8 +248,8 @@ class TelemetryCollector:
         """Clear all collected telemetry data and restart the uptime clock."""
         self._rest_stats.clear()
         self._latency_monitor = LatencyMonitor(
-            spike_threshold_ms=self._latency_monitor._threshold,
-            window_size=self._latency_monitor._window_size,
+            spike_threshold_ms=self._ws_spike_threshold_ms,
+            window_size=self._ws_window_size,
         )
         self._stats_collector = StatsCollector(enable=self._enabled)
         self._start_time = time.monotonic()
