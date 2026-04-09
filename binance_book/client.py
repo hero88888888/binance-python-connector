@@ -23,6 +23,7 @@ from binance_book.schemas.quote import Quote
 from binance_book.schemas.static import SymbolInfo
 from binance_book.schemas.ticker import Ticker24hr
 from binance_book.schemas.trade import Trade
+from binance_book.telemetry import TelemetryCollector
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,9 @@ class BinanceBook:
     smtp_config : SmtpConfig, optional
         Explicit SMTP configuration for auto-email.  If not provided,
         falls back to environment variables.
+    enable_telemetry : bool
+        If True, collect REST call latency, throughput, and error metrics.
+        Access via the ``telemetry`` property.  Default False.
 
     Examples
     --------
@@ -155,6 +159,12 @@ class BinanceBook:
     Enable error reporting with auto-email:
 
     >>> book = BinanceBook(error_reporting=True, auto_email_errors=True)
+
+    Enable telemetry:
+
+    >>> book = BinanceBook(enable_telemetry=True)
+    >>> ob = book.ob_snapshot("BTCUSDT")
+    >>> print(book.telemetry.get_report())
     """
 
     def __init__(
@@ -170,6 +180,7 @@ class BinanceBook:
         error_reporting: bool = False,
         auto_email_errors: bool = False,
         smtp_config: Optional[SmtpConfig] = None,
+        enable_telemetry: bool = False,
     ) -> None:
         self._config = BinanceBookConfig(
             api_key=api_key,
@@ -181,11 +192,16 @@ class BinanceBook:
             reserved_tokens=reserved_tokens,
             timeout=timeout,
         )
+
+        # Telemetry must be created before the REST client so the callback is ready
+        self._telemetry = TelemetryCollector(enabled=enable_telemetry)
+
         self._rest = BinanceRestClient(
             base_url=self._config.get_rest_base_url(),
             api_key=api_key,
             api_secret=api_secret,
             timeout=timeout,
+            on_request_complete=self._telemetry.record_rest_call if enable_telemetry else None,
         )
         self._symbol_cache: dict[str, SymbolInfo] = {}
 
@@ -251,6 +267,34 @@ class BinanceBook:
             The bug report text.
         """
         return _report_bug(description, self._error_reporter, method)
+
+    # ------------------------------------------------------------------
+    # Telemetry
+    # ------------------------------------------------------------------
+
+    @property
+    def telemetry(self) -> TelemetryCollector:
+        """Access the telemetry collector.
+
+        Returns collected REST call statistics, WebSocket latency, and
+        message throughput.  Requires ``enable_telemetry=True`` when
+        creating the client — otherwise data collection is disabled and
+        ``get_report()`` returns an empty summary.
+
+        Returns
+        -------
+        TelemetryCollector
+            The telemetry collector for this client instance.
+
+        Examples
+        --------
+        >>> book = BinanceBook(enable_telemetry=True)
+        >>> ob = book.ob_snapshot("BTCUSDT")
+        >>> report = book.telemetry.get_report()
+        >>> print(report["rest"]["aggregate"]["total_calls"])
+        1
+        """
+        return self._telemetry
 
     # ------------------------------------------------------------------
     # Schema introspection
@@ -1368,6 +1412,7 @@ class BinanceBook:
             api_key=self._config.api_key,
             api_secret=self._config.api_secret,
             timeout=self._config.timeout,
+            on_request_complete=self._telemetry.record_rest_call if self._telemetry.enabled else None,
         )
 
     def _format_output(self, data: list[dict], format: OutputFormat, label: str = "") -> Any:

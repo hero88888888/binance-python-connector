@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import aiohttp
 import orjson
@@ -41,6 +41,10 @@ class BinanceRestClient:
         Binance API secret for request signing.
     timeout : float
         Request timeout in seconds.
+    on_request_complete : callable, optional
+        Callback invoked after every request completes (success or error).
+        Signature: ``(endpoint_path: str, latency_ms: float, success: bool) -> None``.
+        Used for telemetry. Never raises.
     """
 
     def __init__(
@@ -49,12 +53,14 @@ class BinanceRestClient:
         api_key: Optional[str] = None,
         api_secret: Optional[str] = None,
         timeout: float = 10.0,
+        on_request_complete: Optional[Callable[[str, float, bool], None]] = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._api_secret = api_secret
         self._timeout = aiohttp.ClientTimeout(total=timeout)
         self._session: Optional[aiohttp.ClientSession] = None
+        self._on_request_complete = on_request_complete
 
         self._used_weight: int = 0
         self._weight_limit: int = 1200
@@ -138,6 +144,7 @@ class BinanceRestClient:
             await asyncio.sleep(wait)
 
         for attempt in range(3):
+            t0 = time.monotonic()
             try:
                 session = await self._get_session()
                 async with session.request(method, url, params=params) as resp:
@@ -149,6 +156,7 @@ class BinanceRestClient:
                         retry_after = int(resp.headers.get("Retry-After", "60"))
                         self._retry_after = time.monotonic() + retry_after
                         data = orjson.loads(body) if body else {}
+                        self._notify_complete(endpoint.path, t0, success=False)
                         raise BinanceRateLimitError(
                             status_code=resp.status,
                             error_code=data.get("code", -1),
@@ -158,15 +166,18 @@ class BinanceRestClient:
 
                     if resp.status >= 400:
                         data = orjson.loads(body) if body else {}
+                        self._notify_complete(endpoint.path, t0, success=False)
                         raise BinanceAPIError(
                             status_code=resp.status,
                             error_code=data.get("code", -1),
                             message=data.get("msg", f"HTTP {resp.status}"),
                         )
 
+                    self._notify_complete(endpoint.path, t0, success=True)
                     return orjson.loads(body)
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                self._notify_complete(endpoint.path, t0, success=False)
                 if attempt == 2:
                     raise BinanceRequestError(f"Request failed after 3 attempts: {exc}") from exc
                 wait = 0.5 * (2**attempt)
@@ -184,6 +195,16 @@ class BinanceRestClient:
     ) -> Any:
         """Shorthand for a GET request."""
         return await self.request("GET", endpoint, params, signed, weight_override)
+
+    def _notify_complete(self, endpoint_path: str, t0: float, success: bool) -> None:
+        """Invoke the ``on_request_complete`` callback if one is registered."""
+        if self._on_request_complete is None:
+            return
+        latency_ms = (time.monotonic() - t0) * 1000
+        try:
+            self._on_request_complete(endpoint_path, latency_ms, success)
+        except Exception:
+            pass
 
     def _update_weight_from_headers(self, headers: Any, request_weight: int) -> None:
         """Parse rate-limit info from Binance response headers."""
